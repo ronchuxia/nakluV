@@ -13,6 +13,7 @@ Tutorial::Tutorial(RTG &rtg_) : rtg(rtg_) {
 	refsol::Tutorial_constructor(rtg, &depth_format, &render_pass, &command_pool);
 
 	background_pipeline.create(rtg, render_pass, 0);
+	lines_pipeline.create(rtg, render_pass, 0);
 
 	workspaces.resize(rtg.workspaces.size());
 	for (Workspace &workspace : workspaces) {
@@ -33,10 +34,18 @@ Tutorial::~Tutorial() {
 
 	for (Workspace &workspace : workspaces) {
 		refsol::Tutorial_destructor_workspace(rtg, command_pool, &workspace.command_buffer);
+	
+		if (workspace.lines_vertices_src.handle != VK_NULL_HANDLE) {
+			rtg.helpers.destroy_buffer(std::move(workspace.lines_vertices_src));
+		}
+		if (workspace.lines_vertices.handle != VK_NULL_HANDLE) {
+			rtg.helpers.destroy_buffer(std::move(workspace.lines_vertices));
+		}
 	}
 	workspaces.clear();
 
 	background_pipeline.destroy(rtg);
+	lines_pipeline.destroy(rtg);
 
 	refsol::Tutorial_destructor(rtg, &render_pass, &command_pool);
 }
@@ -70,6 +79,75 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 			.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,	//commands will be sent to GPU once, and then immediately thrown away
 		};
 		VK( vkBeginCommandBuffer(workspace.command_buffer, &begin_info) );
+	}
+
+	//upload lines vertices
+	if (!lines_vertices.empty()) {	
+		//[re-]allocate lines buffers if needed
+		size_t needed_bytes = lines_vertices.size() * sizeof(lines_vertices[0]);
+		if (workspace.lines_vertices_src.handle == VK_NULL_HANDLE || workspace.lines_vertices_src.size < needed_bytes) {
+			//calculate the size for the new buffer
+			//round to next multiple of 4k to avoid re-allocating continuously if vertex count grows slowly:
+			size_t new_bytes = ((needed_bytes + 4096) / 4096) * 4096;
+		
+			//destroy the old buffer
+			if (workspace.lines_vertices_src.handle) {
+				rtg.helpers.destroy_buffer(std::move(workspace.lines_vertices_src));
+			}
+			if (workspace.lines_vertices.handle) {
+				rtg.helpers.destroy_buffer(std::move(workspace.lines_vertices));
+			}
+
+			//allocate the new buffer
+			workspace.lines_vertices_src = rtg.helpers.create_buffer(
+				new_bytes,
+				VK_BUFFER_USAGE_TRANSFER_SRC_BIT,	//going to have GPU copy from this memory
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, //host-visible memory, coherent (no special sync needed)
+				Helpers::Mapped	//get a pointer to the memory
+			);
+
+			workspace.lines_vertices = rtg.helpers.create_buffer(
+				new_bytes,
+				VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, //going to use as vertex buffer, also going to have GPU copy into this memory
+				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, //GPU-local memory
+				Helpers::Unmapped //don't get a pointer to the memory
+			);
+
+			std::cout << "Re-allocated lines buffers to " << new_bytes << " bytes." << std::endl;
+		}
+
+		assert(workspace.lines_vertices_src.size == workspace.lines_vertices.size);
+		assert(workspace.lines_vertices_src.size >= needed_bytes);
+	
+		//host-side copy into lines_vertices_src
+		assert(workspace.lines_vertices_src.allocation.mapped);
+		std::memcpy(workspace.lines_vertices_src.allocation.data(), lines_vertices.data(), needed_bytes);
+
+		//device-side copy from lines_vertices_src to lines_vertices
+		VkBufferCopy copy_region{
+			.srcOffset = 0,
+			.dstOffset = 0,
+			.size = needed_bytes,
+		};
+		vkCmdCopyBuffer(workspace.command_buffer, workspace.lines_vertices_src.handle, workspace.lines_vertices.handle, 1, &copy_region);
+	}
+
+	{	//memory barrier to make sure coppies complete before rendering happens
+		VkMemoryBarrier memory_barrier{
+			.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+			.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+			.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
+		};
+
+		vkCmdPipelineBarrier( 
+			workspace.command_buffer,
+			VK_PIPELINE_STAGE_TRANSFER_BIT,
+			VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
+			0, 
+			1, &memory_barrier,
+			0, nullptr,
+			0, nullptr
+		);
 	}
 	
 	{	//render pass
@@ -124,6 +202,20 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 			vkCmdDraw(workspace.command_buffer, 3, 1, 0, 0);	// draws 3 vertices and 1 instance, starting at vertex 0 and instance 0
 		}
 
+		{	//draw with the lines pipeline
+			vkCmdBindPipeline(workspace.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, lines_pipeline.handle);
+
+			{	
+				//use lines_vertices (offset 0) as vertex buffer binding 0:
+				std::array< VkBuffer, 1 > vertex_buffers{ workspace.lines_vertices.handle };
+				std::array< VkDeviceSize, 1 > offsets{ 0 };
+				vkCmdBindVertexBuffers(workspace.command_buffer, 0, uint32_t(vertex_buffers.size()), vertex_buffers.data(), offsets.data());
+			}
+
+			//draw lines vertices:
+			vkCmdDraw(workspace.command_buffer, uint32_t(lines_vertices.size()), 1, 0, 0);
+		}
+
 		vkCmdEndRenderPass(workspace.command_buffer);
 	}
 
@@ -137,6 +229,27 @@ void Tutorial::render(RTG &rtg_, RTG::RenderParams const &render_params) {
 
 void Tutorial::update(float dt) {
 	time += dt;
+
+	//make an 'x'
+	lines_vertices.clear();
+	lines_vertices.reserve(4);
+	lines_vertices.emplace_back(PosColVertex{
+		.Position{ .x = -1.0f, .y = -1.0f, .z = 0.0f },
+		.Color{ .r = 0xff, .g = 0xff, .b = 0xff, .a = 0xff}
+	});
+	lines_vertices.emplace_back(PosColVertex{
+		.Position{ .x =  1.0f, .y =  1.0f, .z = 0.0f },
+		.Color{ .r = 0xff, .g = 0x00, .b = 0x00, .a = 0xff }
+	});
+	lines_vertices.emplace_back(PosColVertex{
+		.Position{ .x = -1.0f, .y =  1.0f, .z = 0.0f },
+		.Color{ .r = 0x00, .g = 0x00, .b = 0xff, .a = 0xff }
+	});
+	lines_vertices.emplace_back(PosColVertex{
+		.Position{ .x =  1.0f, .y = -1.0f, .z = 0.0f },
+		.Color{ .r = 0x00, .g = 0x00, .b = 0xff, .a = 0xff }
+	});
+	assert(lines_vertices.size() == 4);
 }
 
 
