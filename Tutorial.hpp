@@ -68,7 +68,17 @@ struct Tutorial : RTG::Application {
 
 	struct ObjectsPipeline {
 		//descriptor set layouts
+		VkDescriptorSetLayout set0_World = VK_NULL_HANDLE;
 		VkDescriptorSetLayout set1_Transforms = VK_NULL_HANDLE;
+		VkDescriptorSetLayout set2_TEXTURE = VK_NULL_HANDLE;
+
+		struct World {
+			struct { float x, y, z, padding_; } SKY_DIRECTION;
+			struct { float r, g, b, padding_; } SKY_ENERGY;
+			struct { float x, y, z, padding_; } SUN_DIRECTION;
+			struct { float r, g, b, padding_; } SUN_ENERGY;
+		};
+		static_assert(sizeof(World) == 4*4 + 4*4 + 4*4 + 4*4, "World is the expected size.");
 
 		struct Transform {
 			mat4 CLIP_FROM_LOCAL;
@@ -106,6 +116,11 @@ struct Tutorial : RTG::Application {
 		Helpers::AllocatedBuffer Camera; //device-local
 		VkDescriptorSet Camera_descriptors; //references Camera
 
+		//location for ObjectsPipeline::World data: (streamed to GPU per-frame)
+		Helpers::AllocatedBuffer World_src; //host coherent; mapped
+		Helpers::AllocatedBuffer World; //device-local
+		VkDescriptorSet World_descriptors; //references World
+
 		//location for ObjectsPipeline::Transform data: (streamed to GPU per-frame)
 		Helpers::AllocatedBuffer Transforms_src; //host coherent; mapped
 		Helpers::AllocatedBuffer Transforms; //device-local
@@ -123,6 +138,12 @@ struct Tutorial : RTG::Application {
 	};
 	ObjectVertices plane_vertices;
 	ObjectVertices torus_vertices;
+
+	std::vector< Helpers::AllocatedImage > textures;
+	std::vector< VkImageView > texture_views;
+	VkSampler texture_sampler = VK_NULL_HANDLE;
+	VkDescriptorPool texture_descriptor_pool = VK_NULL_HANDLE;
+	std::vector< VkDescriptorSet > texture_descriptors; //allocated from texture_descriptor_pool
 
 	//--------------------------------------------------------------------
 	//Resources that change when the swapchain is resized:
@@ -147,9 +168,12 @@ struct Tutorial : RTG::Application {
 
 	std::vector< LinesPipeline::Vertex > lines_vertices;
 
+	ObjectsPipeline::World world;
+
 	struct ObjectInstance {
 		ObjectVertices vertices;
 		ObjectsPipeline::Transform transform;
+		uint32_t texture = 0;
 	};
 	std::vector< ObjectInstance > object_instances;
 
