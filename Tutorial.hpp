@@ -1,6 +1,7 @@
 #pragma once
 
 #include "PosColVertex.hpp"
+#include "PosNorTexVertex.hpp"
 #include "mat4.hpp"
 
 #include "RTG.hpp"
@@ -65,6 +66,29 @@ struct Tutorial : RTG::Application {
 		void destroy(RTG &);
 	} lines_pipeline;
 
+	struct ObjectsPipeline {
+		//descriptor set layouts
+		VkDescriptorSetLayout set1_Transforms = VK_NULL_HANDLE;
+
+		struct Transform {
+			mat4 CLIP_FROM_LOCAL;
+			mat4 WORLD_FROM_LOCAL;
+			mat4 WORLD_FROM_LOCAL_NORMAL;
+		};
+		static_assert(sizeof(Transform) == 16*4 + 16*4 + 16*4, "Transform is the expected size.");
+
+		//no push constants
+
+		VkPipelineLayout layout = VK_NULL_HANDLE;
+
+		using Vertex = PosNorTexVertex;
+		
+		VkPipeline handle = VK_NULL_HANDLE;
+
+		void create(RTG &, VkRenderPass render_pass, uint32_t subpass);
+		void destroy(RTG &);
+	} objects_pipeline;
+
 	//pools from which per-workspace things are allocated:
 	VkCommandPool command_pool = VK_NULL_HANDLE;
 	VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
@@ -81,11 +105,24 @@ struct Tutorial : RTG::Application {
 		Helpers::AllocatedBuffer Camera_src; //host coherent:mapped
 		Helpers::AllocatedBuffer Camera; //device-local
 		VkDescriptorSet Camera_descriptors; //references Camera
+
+		//location for ObjectsPipeline::Transform data: (streamed to GPU per-frame)
+		Helpers::AllocatedBuffer Transforms_src; //host coherent; mapped
+		Helpers::AllocatedBuffer Transforms; //device-local
+		VkDescriptorSet Transforms_descriptors; //references Transforms
 	};
 	std::vector< Workspace > workspaces;
 
 	//-------------------------------------------------------------------
 	//static scene resources:
+
+	Helpers::AllocatedBuffer object_vertices;
+	struct ObjectVertices {
+		uint32_t first = 0;
+		uint32_t count = 0;
+	};
+	ObjectVertices plane_vertices;
+	ObjectVertices torus_vertices;
 
 	//--------------------------------------------------------------------
 	//Resources that change when the swapchain is resized:
@@ -109,6 +146,12 @@ struct Tutorial : RTG::Application {
 	mat4 CLIP_FROM_WORLD;
 
 	std::vector< LinesPipeline::Vertex > lines_vertices;
+
+	struct ObjectInstance {
+		ObjectVertices vertices;
+		ObjectsPipeline::Transform transform;
+	};
+	std::vector< ObjectInstance > object_instances;
 
 	//--------------------------------------------------------------------
 	//Rendering function, uses all the resources above to queue work to draw a frame:
